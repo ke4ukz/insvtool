@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-INSV Metadata Dumper
+insvtool
 
 Standalone script to dump Insta360 INSV video file metadata to JSON format.
 Replicates the functionality of the Java insvtools dump-meta command.
 
 Usage:
-    python insv_dump.py video.insv
-    python insv_dump.py video.insv -o output.json
-    python insv_dump.py video.insv --frame-type 3
-    python insv_dump.py video.insv --include MAGNETIC,EULER
-    python insv_dump.py video.insv --scan
-    python insv_dump.py --scan *.insv
+    python insvtool.py video.insv
+    python insvtool.py video.insv -o output.json
+    python insvtool.py video.insv --frame-type 3
+    python insvtool.py video.insv --include MAGNETIC,EULER
+    python insvtool.py video.insv --scan
+    python insvtool.py --scan *.insv
 """
 
 import argparse
+import json
 import os
 import sys
 from typing import List, Optional, Set
@@ -24,9 +25,10 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
-from insv_dump.metadata import InsvMetadata
-from insv_dump.dump import dump_metadata, dump_frame
-from insv_dump.frames.frame_types import FrameType, OPTIONAL_PARSED_TYPES
+from insvtool.metadata import InsvMetadata
+from insvtool.dump import dump_metadata, dump_frame
+from insvtool.frames.frame_types import FrameType, OPTIONAL_PARSED_TYPES
+from insvtool.location import find_location
 
 
 def scan_frame_types(filename: str, metadata: 'InsvMetadata') -> None:
@@ -100,24 +102,30 @@ def parse_include_types(include_args: list) -> Set[FrameType]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='Dump INSV metadata to JSON',
+        description='insvtool: inspect Insta360 INSV video metadata',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   %(prog)s video.insv                      Dump to video.insv.meta.json
   %(prog)s video.insv -o output.json       Dump to output.json
+  %(prog)s video.insv -o -                Dump JSON to stdout
+  %(prog)s video.insv --location          Print first active GPS fix and map link
   %(prog)s video.insv --frame-type 3       Dump only GYRO frame
   %(prog)s video.insv --include MAGNETIC   Parse and include MAGNETIC frame
   %(prog)s video.insv --include MAGNETIC,EULER
   %(prog)s video.insv --scan               Show frame types in file
   %(prog)s --scan *.insv                   Scan multiple files
+  %(prog)s -l *.insv                       Print locations for multiple files
 
 Available frame types for --include:
   MAGNETIC, EULER, GYRO_SECONDARY, SPEED, HEARTRATE, EXPOSURE_SECONDARY, POS
 """
     )
     parser.add_argument('input', nargs='*', help='Input INSV file(s)')
-    parser.add_argument('-o', '--output', help='Output JSON file (default: <input>.meta.json)')
+    parser.add_argument('-o', '--output',
+                        help='Output JSON file, or - for stdout (location defaults to stdout)')
+    parser.add_argument('-l', '--location', action='store_true',
+                        help='Output a JSON array of filenames, first active GPS fixes, and map links')
     parser.add_argument('--frame-type', type=int, metavar='CODE',
                         help='Dump only the specified frame type (by numeric code)')
     parser.add_argument('--include', action='append', default=[], metavar='TYPES',
@@ -128,6 +136,9 @@ Available frame types for --include:
                         help='Scan file and show frame types present (no dump)')
 
     args = parser.parse_args()
+
+    if args.location and (args.scan or args.list_types or args.frame_type is not None):
+        parser.error('--location cannot be combined with --scan, --list-types, or --frame-type')
 
     # Handle --list-types
     if args.list_types:
@@ -162,9 +173,31 @@ Available frame types for --include:
                 errors += 1
         return 1 if errors else 0
 
-    # For non-scan operations, only single file is supported
+    if args.location:
+        results = []
+        errors = 0
+        for input_file in input_files:
+            entry = {'filename': os.path.basename(input_file)}
+            try:
+                with open(input_file, 'rb') as f:
+                    metadata = InsvMetadata.read(f)
+                if metadata is None:
+                    raise ValueError('No valid INSV metadata found')
+                location = find_location(metadata)
+                if location is None:
+                    raise ValueError('No valid active GPS location found')
+                entry.update(location)
+            except Exception as e:
+                entry['error'] = str(e)
+                print(f'{input_file}: Error - {e}', file=sys.stderr)
+                errors += 1
+            results.append(entry)
+        status = write_output(json.dumps(results, indent=2), args.output or '-')
+        return 1 if errors else status
+
+    # Full metadata and single-frame dumps accept one input file.
     if len(input_files) > 1:
-        print("Error: Multiple files only supported with --scan", file=sys.stderr)
+        print("Error: Multiple files only supported with --scan or --location", file=sys.stderr)
         return 1
 
     input_file = input_files[0]
@@ -208,11 +241,19 @@ Available frame types for --include:
         output_json = dump_metadata(metadata)
         default_suffix = ".meta.json"
 
-    # Determine output file
-    if args.output:
-        output_file = args.output
-    else:
-        output_file = os.path.basename(input_file) + default_suffix
+    output_file = args.output or (os.path.basename(input_file) + default_suffix)
+    return write_output(output_json, output_file)
+
+
+def write_output(output_json: str, output_file: str) -> int:
+    """Write JSON, keeping diagnostics on stderr."""
+    if output_file == '-':
+        try:
+            sys.stdout.write(output_json + '\n')
+        except OSError as e:
+            print(f'Error writing output: {e}', file=sys.stderr)
+            return 1
+        return 0
 
     # Check if output file exists
     if os.path.exists(output_file):
@@ -224,7 +265,7 @@ Available frame types for --include:
         with open(output_file, 'w') as f:
             f.write(output_json)
             f.write('\n')
-        print(f"Metadata dumped to {output_file}")
+        print(f"Metadata dumped to {output_file}", file=sys.stderr)
     except Exception as e:
         print(f"Error writing output: {e}", file=sys.stderr)
         return 1

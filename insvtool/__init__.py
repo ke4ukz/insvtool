@@ -1,4 +1,4 @@
-"""INSV metadata dump package."""
+"""insvtool: tools for Insta360 INSV video metadata."""
 
 from .metadata import InsvMetadata
 from .header import InsvHeader
