@@ -70,12 +70,13 @@ python insvtool.py --list-types
 |--------|-------------|
 | `input` | Input INSV file(s) (multiple files supported with `--scan` or `--location`) |
 | `-o, --output` | Output JSON file (`-` for stdout), or destination video when writing; ignored for read-only `-l` |
-| `-l, --location [TIME]` | Output locations nearest TIME within ±60 seconds, with full paths, timestamps, place names, and map links (default: 0) |
+| `-l, --location [TIME]` | Print locations nearest TIME, or select the location to write with `--set-exif-location` (default TIME: 0) |
+| `--location-search-range SECONDS` | Search within ±SECONDS of TIME (default: 60); 0 searches all GPS records for the nearest valid fix |
 | `--set-exif-location` | Modify input files to write the selected location into QuickTime GPS metadata (defaults to `-l 0`) |
 | `--exiftool [PATH]` | Use the external ExifTool writer; without PATH, resolve `exiftool` on PATH |
 | `-y, --yes` | Skip the backup warning confirmation for `--set-exif-location` |
 | `--frame-type CODE` | Dump only the specified frame type by numeric code |
-| `--include TYPES` | Include additional frame types for parsing (comma-separated) |
+| `--include TYPES` | Include additional frame types for parsing (comma-separated); GPS is already parsed by default |
 | `--scan` | Scan file(s) and show frame types with counts (no dump) |
 | `--list-types` | List all known frame types and exit |
 
@@ -143,7 +144,10 @@ before or after the requested time. TIME accepts decimal seconds or `h:mm:ss.fff
 from the start; a leading minus counts backward from the end, including `-0`
 for the end itself. The same offset applies separately to each input file.
 Equal-distance fixes use the first encountered record. Times outside the video
-are errors; the search never expands beyond ±60 seconds.
+are errors. `--location-search-range SECONDS` changes the search radius;
+`0` removes the limit and selects the nearest valid fix anywhere in the GPS
+records, including records whose timestamps fall outside the current segment.
+This can select stale data from earlier recording segments.
 
 The search skips void fixes, invalid hemisphere markers, non-finite coordinates,
 and coordinates outside geographic bounds. Active status indicates a valid fix;

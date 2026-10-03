@@ -15,10 +15,11 @@ Usage:
 """
 
 import argparse
+import math
 import os
 import shutil
 import sys
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Any
 
 # Add the package directory to the path for standalone execution
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -102,7 +103,6 @@ def parse_include_types(include_args: list) -> Set[FrameType]:
 
     return types
 
-
 def parse_args() -> argparse.Namespace:
     """Parse, normalize, and validate command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -131,17 +131,20 @@ https://www.openstreetmap.org/copyright
 Nominatim: occasional use only; cached lookups, at most 1 request/second.
 https://operations.osmfoundation.org/policies/nominatim/
 
-Available frame types for --include:
+GPS is parsed automatically; --include GPS is accepted but unnecessary.
+Additional frame types for --include:
   MAGNETIC, EULER, GYRO_SECONDARY, SPEED, HEARTRATE, EXPOSURE_SECONDARY, POS
 """
     )
     parser.add_argument('input', nargs='*', help='Input INSV file(s)')
     parser.add_argument('-o', '--output',
-                        help='Output JSON file (- for stdout), or destination video when writing; ignored with -l')
+                        help='Output JSON file (- for stdout), or destination video with --set-exif-location; ignored with read-only -l')
     parser.add_argument('-l', '--location', nargs='?', const='0', metavar='TIME',
-                        help='Print location near TIME; negative times count from end (always stdout)')
+                        help='Print location near TIME, or select the location to write with --set-exif-location; default 0, negative times count from end')
     parser.add_argument('--set-exif-location', action='store_true',
-                        help='Write the selected GPS fix into standard QuickTime location metadata')
+                        help='Write GPS location into standard QuickTime metadata; -l selects the time (default: -l 0)')
+    parser.add_argument('--location-search-range', type=float, default=60.0, metavar='SECONDS',
+                        help='Search within this many seconds before/after -l TIME (default: 60); 0 searches all GPS records')
     parser.add_argument('--exiftool', nargs='?', const='exiftool', metavar='PATH',
                         help='Use ExifTool instead of the Python writer (default binary: PATH lookup)')
     parser.add_argument('-y', '--yes', action='store_true',
@@ -188,6 +191,9 @@ Available frame types for --include:
             args.location = parse_location_time(args.location)
         except ValueError as e:
             parser.error(str(e))
+
+    if not math.isfinite(args.location_search_range) or args.location_search_range < 0:
+        parser.error('--location-search-range must be a finite, non-negative number of seconds')
 
     if args.set_exif_location and args.location is None:
         args.location = 0.0
@@ -279,9 +285,11 @@ def main() -> int:
                     metadata = InsvMetadata.read(f)
                 if metadata is None:
                     raise ValueError('No valid INSV metadata found')
-                location = find_location(metadata, args.location)
+                location = find_location(metadata, args.location, args.location_search_range)
                 if location is None:
-                    raise ValueError('No valid active GPS location found within 60 seconds of requested time')
+                    window = (f'within {args.location_search_range:g} seconds of requested time'
+                              if args.location_search_range else 'in GPS records')
+                    raise ValueError(f'No valid active GPS location found {window}')
                 entry.update(location)
                 if args.set_exif_location:
                     if args.output:

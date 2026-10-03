@@ -26,12 +26,15 @@ def parse_location_time(value: str) -> float:
     return -seconds if value.startswith('-') else seconds
 
 
-def find_location(metadata: InsvMetadata, time_offset: float = 0.0) -> Optional[dict]:
+def find_location(metadata: InsvMetadata, time_offset: float = 0.0,
+                  search_range: float = 60.0) -> Optional[dict]:
     """Return decimal coordinates and a map link, or None without an active fix.
 
     GPS payload byte 2 is the NMEA-style status: A = active, V = void.
     This indicates fix validity, not a measured accuracy or confidence score.
     """
+    if not math.isfinite(search_range) or search_range < 0:
+        raise ValueError('Location search range must be finite and non-negative')
     from_end = math.copysign(1, time_offset) < 0
     info = metadata.find_frame(FrameType.INFO)
     start_ms = None
@@ -70,7 +73,7 @@ def find_location(metadata: InsvMetadata, time_offset: float = 0.0) -> Optional[
             if target_ms is None:
                 target_ms = timestamp_ms  # Untimed lookup without INFO metadata.
             distance = abs(timestamp_ms - target_ms)
-            if distance > 60_000 or distance >= best_distance:
+            if (search_range and distance > search_range * 1000) or distance >= best_distance:
                 continue
             if record.payload[2:3] != b'A':
                 continue

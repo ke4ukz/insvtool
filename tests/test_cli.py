@@ -217,6 +217,33 @@ class CliTests(unittest.TestCase):
         result = self.run_cli('-l', '60')
         self.assertEqual(report_entries(result.stdout)[0]['latitude'], 2)
 
+    def test_custom_location_search_range(self):
+        start = 1700000000
+        self.path.write_bytes(insv_file([
+            gps_record(latitude=1, status=b'V', time=start),
+            gps_record(latitude=2, time=start + 120),
+            gps_record(latitude=3, time=start + 200),
+        ], start=start, duration=300))
+        self.assertEqual(self.run_cli('-l').returncode, 1)
+        self.assertEqual(self.run_cli('-l', '--location-search-range', '119.9').returncode, 1)
+        for radius in ('120', '0'):
+            result = self.run_cli('-l', '--location-search-range', radius)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(report_entries(result.stdout)[0]['latitude'], 2)
+        result = self.run_cli('-l', '-0', '--location-search-range', '0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(report_entries(result.stdout)[0]['latitude'], 3)
+        # Unlimited search can find a retained fix from an earlier segment.
+        self.path.write_bytes(insv_file([gps_record(latitude=4, time=start - 1000)],
+                                        start=start, duration=300))
+        result = self.run_cli('-l', '--location-search-range', '0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(report_entries(result.stdout)[0]['latitude'], 4)
+        for radius in ('-1', 'nan', 'inf'):
+            result = self.run_cli('-l', '--location-search-range', radius)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('finite, non-negative', result.stderr)
+
     def test_location_without_timing_metadata_and_bad_times(self):
         self.path.write_bytes(insv_file([gps_record()]))
         for value in ('10', '-0'):
