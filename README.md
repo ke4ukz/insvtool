@@ -43,6 +43,9 @@ python insvtool.py video.insv -o -
 # Print the first active GPS location and an OpenStreetMap pin link
 python insvtool.py video.insv --location
 python insvtool.py -l *.insv
+python insvtool.py -l 1:30:00.000 video.insv
+python insvtool.py -l -0 video.insv
+python insvtool.py -l -60.5 video.insv
 python insvtool.py video.insv -l -o location.json
 
 # Dump only a specific frame type (by numeric code)
@@ -68,7 +71,7 @@ python insvtool.py --list-types
 |--------|-------------|
 | `input` | Input INSV file(s) (multiple files supported with `--scan` or `--location`) |
 | `-o, --output` | Output JSON file, or `-` for stdout (default: `<input>.meta.json`; location defaults to stdout) |
-| `-l, --location` | Output a JSON array of filenames, first valid active GPS fixes, and OpenStreetMap pin links |
+| `-l, --location [TIME]` | Output locations nearest TIME within ±60 seconds, with filenames and map links (default: 0) |
 | `--frame-type CODE` | Dump only the specified frame type by numeric code |
 | `--include TYPES` | Include additional frame types for parsing (comma-separated) |
 | `--scan` | Scan file(s) and show frame types with counts (no dump) |
@@ -76,12 +79,29 @@ python insvtool.py --list-types
 
 ## Frame Types
 
-`--location` searches GPS frames in file order, skipping void fixes, invalid
-hemisphere markers, non-finite coordinates, and coordinates outside geographic
-bounds. It uses the first active fix; the format has no decoded accuracy score.
-South and west coordinates are returned as negative decimal degrees. Location output is always an array, even for one input, with each basename in
+`--location [TIME]` selects the nearest valid active GPS fix within 60 seconds
+before or after the requested time. TIME accepts decimal seconds or `h:mm:ss.fff`
+(fractional seconds optional), defaulting to `0:00:00.000`. Positive times count
+from the start; a leading minus counts backward from the end, including `-0`
+for the end itself. The same offset applies separately to each input file.
+Equal-distance fixes use the first encountered record. Times outside the video
+are errors; the search never expands beyond ±60 seconds.
+
+The search skips void fixes, invalid hemisphere markers, non-finite coordinates,
+and coordinates outside geographic bounds. Active status indicates a valid fix;
+the format has no decoded accuracy score. South and west coordinates are returned
+as negative decimal degrees.
+
+Timing uses GPS Unix seconds plus milliseconds and the INFO `FirstGpsTimestamp`
+anchor (milliseconds). End-relative lookups also require INFO `TotalTime` (whole
+seconds, so the end reference has that precision). If the anchor is absent, only
+an untimed/default start lookup is supported, using the first GPS timestamp.
+Timed lookups fail rather than estimating timing from file dates. TimeShift and
+timelapse playback may not align with the GPS recording clock.
+
+Location output is always an array, even for one input, with each basename in
 `filename`. Files are processed in input order. If a file cannot be read or has no
-valid active fix, its entry contains `filename` and `error`; other files are still
+valid active fix within the search window, its entry contains `filename` and `error`; other files are still
 processed. Any such failure produces exit status 1 and a diagnostic on stderr.
 It cannot be combined with `--scan`, `--list-types`, or `--frame-type`.
 

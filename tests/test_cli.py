@@ -9,19 +9,24 @@ import tempfile
 import unittest
 
 from insvtool.header import HEADER_SIZE, SIGNATURE
+from insvtool.proto.extra_metadata_pb2 import ExtraMetadata
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'insvtool.py'
 
 
-def gps_record(latitude=40.5, longitude=73.25, ns=b'N', ew=b'W', status=b'A'):
-    return struct.pack('<qHc d c d c 3d', 1700000000, 0, status,
+def gps_record(latitude=40.5, longitude=73.25, ns=b'N', ew=b'W', status=b'A', time=1700000000):
+    return struct.pack('<IIHc d c d c 3d', int(time), 0, round((time % 1) * 1000), status,
                        latitude, ns, longitude, ew, 0, 0, 0)
 
 
-def insv_file(payloads):
+def insv_file(payloads, start=None, duration=None):
     frames = b''.join(payload + struct.pack('<BBI', 1, 7, len(payload))
                       for payload in payloads)
+    if start is not None:
+        info = ExtraMetadata(FirstGpsTimestamp=round(start * 1000), TotalTime=duration)
+        payload = info.SerializeToString()
+        frames += payload + struct.pack('<BBI', 1, 1, len(payload))
     return frames + bytes(32) + struct.pack('<II', len(frames) + HEADER_SIZE, 3) + SIGNATURE
 
 
@@ -100,6 +105,58 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.stdout, '')
         entries = json.loads((Path(self.directory.name) / 'locations.json').read_text())
         self.assertEqual(len(entries), 2)
+
+    def test_location_offsets_and_negative_zero(self):
+        start = 1700000000
+        self.path.write_bytes(insv_file([
+            gps_record(latitude=1, time=start + 10),
+            gps_record(latitude=2, time=start + 5400.125),
+            gps_record(latitude=3, time=start + 7100),
+            gps_record(latitude=4, time=start + 7199.5),
+        ], start=start, duration=7200))
+        for value, expected in [('0', 1), ('5400.125', 2), ('1:30:00.125', 2),
+                                ('-100', 3), ('-0:01:40.000', 3), ('-0', 4)]:
+            with self.subTest(value=value):
+                result = self.run_cli('-l', value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)[0]['latitude'], expected)
+        result = self.run_cli('-l', '3600')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('within 60 seconds', result.stderr)
+        for value in ('7201', '-7201'):
+            result = self.run_cli('-l', value)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('outside the video duration', result.stderr)
+
+    def test_location_window_boundary_and_delayed_fix(self):
+        start = 1700000000
+        for delta, expected in [(60, 0), (60.001, 1)]:
+            self.path.write_bytes(insv_file([gps_record(time=start + delta)],
+                                           start=start, duration=120))
+            result = self.run_cli('-l')
+            self.assertEqual(result.returncode, expected, result.stderr)
+        self.path.write_bytes(insv_file([
+            gps_record(latitude=1, time=start + 50),
+            gps_record(latitude=2, time=start + 60.25),
+        ], start=start, duration=120))
+        result = self.run_cli('-l', '60')
+        self.assertEqual(json.loads(result.stdout)[0]['latitude'], 2)
+
+    def test_location_without_timing_metadata_and_bad_times(self):
+        self.path.write_bytes(insv_file([gps_record()]))
+        for value in ('10', '-0'):
+            result = self.run_cli('-l', value)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('requires FirstGpsTimestamp', result.stderr)
+        for value in ('nan', 'inf', '1:60:00', '1:00:60', 'hello'):
+            result = self.run_cli('--location=' + value)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, '')
+        # Bare -l before filenames must retain both inputs.
+        result = subprocess.run([sys.executable, str(SCRIPT), '-l', str(self.path),
+                                 str(self.path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(json.loads(result.stdout)), 2)
 
     def test_location_mode_conflicts(self):
         self.path.write_bytes(insv_file([gps_record()]))

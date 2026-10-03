@@ -28,7 +28,7 @@ if script_dir not in sys.path:
 from insvtool.metadata import InsvMetadata
 from insvtool.dump import dump_metadata, dump_frame
 from insvtool.frames.frame_types import FrameType, OPTIONAL_PARSED_TYPES
-from insvtool.location import find_location
+from insvtool.location import find_location, parse_location_time, TIME_PATTERN
 
 
 def scan_frame_types(filename: str, metadata: 'InsvMetadata') -> None:
@@ -115,7 +115,10 @@ Examples:
   %(prog)s video.insv --include MAGNETIC,EULER
   %(prog)s video.insv --scan               Show frame types in file
   %(prog)s --scan *.insv                   Scan multiple files
-  %(prog)s -l *.insv                       Print locations for multiple files
+  %(prog)s -l *.insv                       Print locations near the start
+  %(prog)s -l 1:30:00.000 video.insv       Location at 90 minutes
+  %(prog)s -l -0 video.insv                Location near the end
+  %(prog)s -l -60.5 video.insv             Location 60.5 seconds before the end
 
 Available frame types for --include:
   MAGNETIC, EULER, GYRO_SECONDARY, SPEED, HEARTRATE, EXPOSURE_SECONDARY, POS
@@ -124,8 +127,8 @@ Available frame types for --include:
     parser.add_argument('input', nargs='*', help='Input INSV file(s)')
     parser.add_argument('-o', '--output',
                         help='Output JSON file, or - for stdout (location defaults to stdout)')
-    parser.add_argument('-l', '--location', action='store_true',
-                        help='Output a JSON array of filenames, first active GPS fixes, and map links')
+    parser.add_argument('-l', '--location', nargs='?', const='0', metavar='TIME',
+                        help='GPS fix nearest TIME within 60 seconds; negative times count from end')
     parser.add_argument('--frame-type', type=int, metavar='CODE',
                         help='Dump only the specified frame type (by numeric code)')
     parser.add_argument('--include', action='append', default=[], metavar='TYPES',
@@ -135,9 +138,33 @@ Available frame types for --include:
     parser.add_argument('--scan', action='store_true',
                         help='Scan file and show frame types present (no dump)')
 
-    args = parser.parse_args()
+    # Attach time values to the option so argparse accepts negative h:mm:ss
+    # and does not consume a filename when -l has no time argument.
+    argv = sys.argv[1:]
+    normalized = []
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == '--':
+            normalized.extend(argv[index:])
+            break
+        if arg in ('-l', '--location'):
+            value = '0'
+            if index + 1 < len(argv) and TIME_PATTERN.fullmatch(argv[index + 1]):
+                index += 1
+                value = argv[index]
+            normalized.append('--location=' + value)
+        else:
+            normalized.append(arg)
+        index += 1
+    args = parser.parse_intermixed_args(normalized)
+    if args.location is not None:
+        try:
+            args.location = parse_location_time(args.location)
+        except ValueError as e:
+            parser.error(str(e))
 
-    if args.location and (args.scan or args.list_types or args.frame_type is not None):
+    if args.location is not None and (args.scan or args.list_types or args.frame_type is not None):
         parser.error('--location cannot be combined with --scan, --list-types, or --frame-type')
 
     # Handle --list-types
@@ -173,7 +200,7 @@ Available frame types for --include:
                 errors += 1
         return 1 if errors else 0
 
-    if args.location:
+    if args.location is not None:
         results = []
         errors = 0
         for input_file in input_files:
@@ -183,9 +210,9 @@ Available frame types for --include:
                     metadata = InsvMetadata.read(f)
                 if metadata is None:
                     raise ValueError('No valid INSV metadata found')
-                location = find_location(metadata)
+                location = find_location(metadata, args.location)
                 if location is None:
-                    raise ValueError('No valid active GPS location found')
+                    raise ValueError('No valid active GPS location found within 60 seconds of requested time')
                 entry.update(location)
             except Exception as e:
                 entry['error'] = str(e)
