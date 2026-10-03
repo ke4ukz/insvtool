@@ -103,7 +103,8 @@ def parse_include_types(include_args: list) -> Set[FrameType]:
     return types
 
 
-def main() -> int:
+def parse_args() -> argparse.Namespace:
+    """Parse, normalize, and validate command-line arguments."""
     parser = argparse.ArgumentParser(
         description='insvtool: inspect Insta360 INSV video metadata',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -198,6 +199,22 @@ Available frame types for --include:
     if args.location is not None and (args.scan or args.list_types or args.frame_type is not None):
         parser.error('--location cannot be combined with --scan, --list-types, or --frame-type')
 
+    if not args.input and not args.list_types:
+        parser.error("the following arguments are required: input")
+    if args.set_exif_location:
+        if args.output == '-':
+            parser.error('--set-exif-location -o requires a video filename, not -')
+        if args.output and len(args.input) != 1:
+            parser.error('--set-exif-location with -o requires exactly one input file')
+        if args.output and (os.path.islink(args.output) or
+                            (os.path.lexists(args.output) and not os.path.isfile(args.output))):
+            parser.error('location output must be a regular file, not a directory or symbolic link')
+    return args
+
+
+def main() -> int:
+    args = parse_args()
+
     # Handle --list-types
     if args.list_types:
         print("Known frame types:")
@@ -208,10 +225,6 @@ Available frame types for --include:
             print(f"  {ft.value:3d}: {ft.name}{optional}")
         return 0
 
-    # Check input file is provided
-    if not args.input:
-        parser.error("the following arguments are required: input")
-
     input_files = args.input
     exiftool = None
     if args.set_exif_location:
@@ -220,18 +233,11 @@ Available frame types for --include:
             if exiftool is None:
                 print(f'Error: ExifTool executable not found: {args.exiftool}', file=sys.stderr)
                 return 1
-        if args.output == '-':
-            parser.error('--set-exif-location -o requires a video filename, not -')
-        if args.output and len(input_files) != 1:
-            parser.error('--set-exif-location with -o requires exactly one input file')
         output_exists = bool(args.output and os.path.lexists(args.output))
         same_input = bool(args.output and (
             os.path.abspath(args.output) == os.path.abspath(input_files[0]) or
             (output_exists and os.path.exists(input_files[0]) and
              os.path.samefile(args.output, input_files[0]))))
-        if args.output and (os.path.islink(args.output) or
-                            (output_exists and not os.path.isfile(args.output))):
-            parser.error('location output must be a regular file, not a directory or symbolic link')
         prompt = None
         if not args.output or same_input:
             prompt = (f'WARNING: This will modify {len(input_files)} input file(s). '
