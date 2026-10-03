@@ -10,7 +10,7 @@ This is a Python port of the `dump-meta` command from [insvtools](https://github
 - Outputs human-readable JSON format
 - Parses common frame types: INFO, GYRO, GPS, EXPOSURE, TIMELAPSE
 - Optional parsing for additional frame types (MAGNETIC, EULER, etc.)
-- Single dependency: `protobuf` Python package
+- Requires `protobuf`; optional ExifTool backend for writing standard location metadata
 
 ## Installation
 
@@ -40,13 +40,12 @@ python insvtool.py video.insv -o output.json
 # Print JSON to stdout (also works with --frame-type)
 python insvtool.py video.insv -o -
 
-# Print the first active GPS location and an OpenStreetMap pin link
+# Print GPS coordinates, timestamp, place name, and an OpenStreetMap pin link
 python insvtool.py video.insv --location
 python insvtool.py -l *.insv
 python insvtool.py -l 1:30:00.000 video.insv
 python insvtool.py -l -0 video.insv
 python insvtool.py -l -60.5 video.insv
-python insvtool.py video.insv -l -o location.json
 
 # Dump only a specific frame type (by numeric code)
 python insvtool.py video.insv --frame-type 3
@@ -70,14 +69,73 @@ python insvtool.py --list-types
 | Option | Description |
 |--------|-------------|
 | `input` | Input INSV file(s) (multiple files supported with `--scan` or `--location`) |
-| `-o, --output` | Output JSON file, or `-` for stdout (default: `<input>.meta.json`; location defaults to stdout) |
-| `-l, --location [TIME]` | Output locations nearest TIME within ±60 seconds, with filenames and map links (default: 0) |
+| `-o, --output` | Output JSON file (`-` for stdout), or destination video when writing; ignored for read-only `-l` |
+| `-l, --location [TIME]` | Output locations nearest TIME within ±60 seconds, with full paths, timestamps, place names, and map links (default: 0) |
+| `--set-exif-location` | Modify input files to write the selected location into QuickTime GPS metadata (defaults to `-l 0`) |
+| `--exiftool [PATH]` | Use the external ExifTool writer; without PATH, resolve `exiftool` on PATH |
+| `-y, --yes` | Skip the backup warning confirmation for `--set-exif-location` |
 | `--frame-type CODE` | Dump only the specified frame type by numeric code |
 | `--include TYPES` | Include additional frame types for parsing (comma-separated) |
 | `--scan` | Scan file(s) and show frame types with counts (no dump) |
 | `--list-types` | List all known frame types and exit |
 
-## Frame Types
+## Write standard location metadata
+
+```bash
+python insvtool.py --set-exif-location video.insv
+python insvtool.py --set-exif-location -l -0 video.insv
+python insvtool.py --set-exif-location video.insv -o located.insv
+python insvtool.py --set-exif-location -l 90.5 -y *.insv
+
+# Optional alternative backend
+python insvtool.py --set-exif-location --exiftool video.insv
+python insvtool.py --set-exif-location --exiftool /path/to/exiftool video.insv
+```
+
+The default writer edits QuickTime metadata directly in Python, with no external
+binary dependency. Location metadata uses the QuickTime layout recognized by
+Apple AVFoundation; updating a file also repairs the ISO-style layout produced
+by earlier versions of this writer. It supports non-fragmented containers with one movie metadata
+box, preserving other metadata and media offsets. Fragmented, malformed, or
+unsupported layouts fail without replacing the file. Compatibility with future
+INSV versions or every media application is not guaranteed.
+
+`--exiftool` uses the environment's `exiftool` executable instead. Supply a path
+as an optional argument, or use `--exiftool=/path/to/exiftool` to make the argument
+unambiguous. ExifTool is needed only for this backend (macOS: `brew install exiftool`).
+Both backends retain the backup warning and support `-y`.
+
+Despite the command name, videos use QuickTime `Keys:GPSCoordinates`
+(`com.apple.quicktime.location.ISO6709`), rather than photo EXIF GPS tags.
+The same time selection and ±60-second limit as `-l` apply. Without `-l`, the
+command uses the start location. Standard location visibility depends on the
+inspector's support for that tag.
+
+Without `-o`, this modifies the input files. Keep a backup: the command asks for
+`y` once before processing the batch. With `-o new.insv`, it writes a separate
+video and skips the modification confirmation. If the destination already
+exists, it asks `Overwrite? [y/n]`. `-y` skips either confirmation. Any other
+response or EOF cancels. Naming the input itself as the output still requires
+the modification confirmation. Writing to `-o` supports one input file and
+requires a filename; `-o -` is rejected in this mode. No automatic backup is retained. The edited file gets a current filesystem
+modification time; embedded recording dates remain unchanged. An edited temporary copy is verified
+for matching coordinates and a byte-identical Insta360 trailer before replacing
+the selected destination. Temporary disk space is required for a full edited copy (and another rewrite
+when using ExifTool).
+Symbolic-link inputs are rejected. Finder tags and comments are separate metadata;
+their preservation by the replacement has not been verified.
+
+Location results use the readable report described below, with a `Written` line
+on successful writes. Failures show `Error`, continue to the next file, and cause
+exit status 1. Prompts and status messages go to stderr. Reports always go to
+stdout; in write mode, `-o` selects the video destination.
+
+macOS Finder and Photos recognize the location when a compatible file has an
+`.mp4` extension. They do not use it for `.insv`, which relies on Insta360's
+preview handler; Photos does not import INSV directly. A `.mp4` copy still has
+unstitched camera streams and may show a fisheye image.
+
+## Location reports
 
 `--location [TIME]` selects the nearest valid active GPS fix within 60 seconds
 before or after the requested time. TIME accepts decimal seconds or `h:mm:ss.fff`
@@ -99,27 +157,73 @@ an untimed/default start lookup is supported, using the first GPS timestamp.
 Timed lookups fail rather than estimating timing from file dates. TimeShift and
 timelapse playback may not align with the GPS recording clock.
 
-Location output is always an array, even for one input, with each basename in
-`filename`. Files are processed in input order. If a file cannot be read or has no
-valid active fix within the search window, its entry contains `filename` and `error`; other files are still
-processed. Any such failure produces exit status 1 and a diagnostic on stderr.
-It cannot be combined with `--scan`, `--list-types`, or `--frame-type`.
+Location output is plain text, with one block per file in input order. Each block
+is printed and flushed as soon as that file finishes; attribution appears once
+at the end. It always
+goes to stdout; `-o` is ignored for read-only `-l`. Each block contains the absolute
+path, the actual selected GPS record's video offset, its full GPS timestamp in
+UTC, exact decimal-degree coordinates on one line, an approximate place name,
+and an OpenStreetMap pin link. The video offset is shown as unknown if timing
+metadata is missing. GPS date/time reflects the timestamp encoded in the record;
+no camera-specific GPS/UTC clock correction is applied.
 
-Example location output:
+Example (place name is illustrative):
 
-```json
-[
-  {
-    "filename": "video.insv",
-    "latitude": 40.5,
-    "longitude": -73.25,
-    "mapUrl": "https://www.openstreetmap.org/?mlat=40.5&mlon=-73.25#map=16/40.5/-73.25"
-  }
-]
+```text
+/full/path/video.insv
+  Video time: 0:00:10.125
+  GPS date/time: 2026-01-18T21:30:05.125Z
+  Coordinates: 29.67829760, -84.87257690
+  Location: Eastpoint, Florida, United States
+  Map: https://www.openstreetmap.org/?mlat=29.6782976&mlon=-84.8725769#map=16/29.6782976/-84.8725769
+
+Location names and maps: © OpenStreetMap contributors (ODbL), https://www.openstreetmap.org/copyright
 ```
 
-JSON output with `-o -` contains no status messages. Warnings, errors, and file
-write confirmations go to stderr. Existing output files are never overwritten.
+Files without a valid fix show an error block. A failed place-name lookup still
+shows the coordinates, timestamps, and map link, with the name unavailable.
+Processing continues and exit status is 1 if any file or name lookup failed.
+`-l` cannot be combined with `--scan`, `--list-types`, or `--frame-type`.
+Full metadata and individual-frame dumps retain their original JSON format and
+`-o` behavior. Warnings, errors, and confirmations go to stderr.
+
+### Place names and caching
+
+Location reports request approximate named places and settlements from Nominatim. Coordinates
+are rounded to three decimal places for both the request and cache key (roughly
+100-meter cells); reported coordinates and map pins retain their exact values.
+Successful names are cached in `~/.insvtool_location_cache.db` using Python's
+built-in SQLite support, with no expiration. Cached locations need no network
+request. The cache key includes the provider URL, language, detail level, layers, and name
+format version, so older county-level results do not hide more detailed lookups.
+
+Requests use `zoom=17` (street level, below building/address detail) and include
+address, points of interest, and natural features. The formatter prefers named
+parks, islands, and landmarks, then neighbourhoods and settlements, then county,
+state, or country. House numbers, roads, and full street addresses are excluded.
+Nominatim returns one nearby suitable object, so a park or island name is not
+guaranteed and the rounded point can occasionally select a neighbouring place.
+
+Uncached requests are serialized and spaced at least 1.05 seconds apart by start
+time, including across local processes sharing the cache. Coordinate extraction
+and request time count toward that interval. Requests use an identifying
+`insvtool` User-Agent and a 10-second timeout. Attribution appears once per report
+and in help. The lookup sends rounded coordinates to the service; do not use it
+for confidential locations.
+
+Use this feature for occasional manual runs. The public service's
+[Nominatim usage policy](https://operations.osmfoundation.org/policies/nominatim/)
+discourages large batches and restricts regularly scheduled or day-long scripts
+to four requests per minute. Do not use the default endpoint for those workloads
+or distributed runs. The application's aggregate traffic must also stay within
+the service's limits.
+
+Set `INSVTOOL_NOMINATIM_URL` to another compatible reverse endpoint to change
+providers without a software update. Set `INSVTOOL_LOCATION_CACHE` to select a
+different cache database path. Cache access or network failures leave the GPS
+report usable and appear as place-name lookup failures.
+
+## Frame Types
 
 ### Default Parsed Frames
 | Code | Name | Description |
@@ -275,7 +379,11 @@ The POS frame provides the most useful telemetry (position, velocity, AGL) for m
     ├── header.py                   # INSV file header parsing
     ├── metadata.py                 # Main orchestration
     ├── dump.py                     # JSON serialization
-    ├── location.py                 # First active GPS fix and map link
+    ├── location.py                 # Timed GPS selection
+    ├── location_output.py          # Readable reports
+    ├── geocode.py                  # Cached city names
+    ├── quicktime.py                # Direct metadata editing
+    ├── set_location.py             # Verified video writes
     ├── frames/                     # Frame type implementations
     │   ├── frame_types.py
     │   ├── frame_header.py

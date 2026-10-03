@@ -15,8 +15,8 @@ Usage:
 """
 
 import argparse
-import json
 import os
+import shutil
 import sys
 from typing import List, Optional, Set
 
@@ -29,6 +29,9 @@ from insvtool.metadata import InsvMetadata
 from insvtool.dump import dump_metadata, dump_frame
 from insvtool.frames.frame_types import FrameType, OPTIONAL_PARSED_TYPES
 from insvtool.location import find_location, parse_location_time, TIME_PATTERN
+from insvtool.set_location import set_location
+from insvtool.geocode import Geocoder, ATTRIBUTION
+from insvtool.location_output import format_location
 
 
 def scan_frame_types(filename: str, metadata: 'InsvMetadata') -> None:
@@ -118,7 +121,14 @@ Examples:
   %(prog)s -l *.insv                       Print locations near the start
   %(prog)s -l 1:30:00.000 video.insv       Location at 90 minutes
   %(prog)s -l -0 video.insv                Location near the end
+  %(prog)s --set-exif-location video.insv   Write start location (asks for confirmation)
+  %(prog)s --set-exif-location -l -0 -y video.insv
   %(prog)s -l -60.5 video.insv             Location 60.5 seconds before the end
+
+Location names: © OpenStreetMap contributors (ODbL)
+https://www.openstreetmap.org/copyright
+Nominatim: occasional use only; cached lookups, at most 1 request/second.
+https://operations.osmfoundation.org/policies/nominatim/
 
 Available frame types for --include:
   MAGNETIC, EULER, GYRO_SECONDARY, SPEED, HEARTRATE, EXPOSURE_SECONDARY, POS
@@ -126,9 +136,15 @@ Available frame types for --include:
     )
     parser.add_argument('input', nargs='*', help='Input INSV file(s)')
     parser.add_argument('-o', '--output',
-                        help='Output JSON file, or - for stdout (location defaults to stdout)')
+                        help='Output JSON file (- for stdout), or destination video when writing; ignored with -l')
     parser.add_argument('-l', '--location', nargs='?', const='0', metavar='TIME',
-                        help='GPS fix nearest TIME within 60 seconds; negative times count from end')
+                        help='Print location near TIME; negative times count from end (always stdout)')
+    parser.add_argument('--set-exif-location', action='store_true',
+                        help='Write the selected GPS fix into standard QuickTime location metadata')
+    parser.add_argument('--exiftool', nargs='?', const='exiftool', metavar='PATH',
+                        help='Use ExifTool instead of the Python writer (default binary: PATH lookup)')
+    parser.add_argument('-y', '--yes', action='store_true',
+                        help='Skip the confirmation for --set-exif-location')
     parser.add_argument('--frame-type', type=int, metavar='CODE',
                         help='Dump only the specified frame type (by numeric code)')
     parser.add_argument('--include', action='append', default=[], metavar='TYPES',
@@ -154,6 +170,14 @@ Available frame types for --include:
                 index += 1
                 value = argv[index]
             normalized.append('--location=' + value)
+        elif arg == '--exiftool':
+            value = 'exiftool'
+            if index + 1 < len(argv):
+                candidate = argv[index + 1]
+                if not candidate.startswith('-') and not candidate.lower().endswith(('.insv', '.lrv')):
+                    index += 1
+                    value = candidate
+            normalized.append('--exiftool=' + value)
         else:
             normalized.append(arg)
         index += 1
@@ -163,6 +187,13 @@ Available frame types for --include:
             args.location = parse_location_time(args.location)
         except ValueError as e:
             parser.error(str(e))
+
+    if args.set_exif_location and args.location is None:
+        args.location = 0.0
+    if args.exiftool is not None and not args.set_exif_location:
+        parser.error('--exiftool requires --set-exif-location')
+    if args.yes and not args.set_exif_location:
+        parser.error('-y requires --set-exif-location')
 
     if args.location is not None and (args.scan or args.list_types or args.frame_type is not None):
         parser.error('--location cannot be combined with --scan, --list-types, or --frame-type')
@@ -182,6 +213,38 @@ Available frame types for --include:
         parser.error("the following arguments are required: input")
 
     input_files = args.input
+    exiftool = None
+    if args.set_exif_location:
+        if args.exiftool is not None:
+            exiftool = shutil.which(args.exiftool)
+            if exiftool is None:
+                print(f'Error: ExifTool executable not found: {args.exiftool}', file=sys.stderr)
+                return 1
+        if args.output == '-':
+            parser.error('--set-exif-location -o requires a video filename, not -')
+        if args.output and len(input_files) != 1:
+            parser.error('--set-exif-location with -o requires exactly one input file')
+        output_exists = bool(args.output and os.path.lexists(args.output))
+        same_input = bool(args.output and (
+            os.path.abspath(args.output) == os.path.abspath(input_files[0]) or
+            (output_exists and os.path.exists(input_files[0]) and
+             os.path.samefile(args.output, input_files[0]))))
+        if args.output and (os.path.islink(args.output) or
+                            (output_exists and not os.path.isfile(args.output))):
+            parser.error('location output must be a regular file, not a directory or symbolic link')
+        prompt = None
+        if not args.output or same_input:
+            prompt = (f'WARNING: This will modify {len(input_files)} input file(s). '
+                      'Make sure you have a backup. '
+                      + ('The Python writer may be incompatible with other INSV versions. '
+                         if exiftool is None else '') + 'Press y to continue: ')
+        elif output_exists:
+            prompt = f'Output file {args.output} already exists. Overwrite? [y/n]: '
+        if prompt and not args.yes:
+            print(prompt, file=sys.stderr, end='', flush=True)
+            if sys.stdin.readline().strip().lower() != 'y':
+                print('Cancelled; no files were modified.', file=sys.stderr)
+                return 1
 
     # Handle --scan (supports multiple files)
     if args.scan:
@@ -201,10 +264,10 @@ Available frame types for --include:
         return 1 if errors else 0
 
     if args.location is not None:
-        results = []
         errors = 0
+        geocoder = Geocoder()
         for input_file in input_files:
-            entry = {'filename': os.path.basename(input_file)}
+            entry = {'path': os.path.abspath(input_file)}
             try:
                 with open(input_file, 'rb') as f:
                     metadata = InsvMetadata.read(f)
@@ -214,13 +277,38 @@ Available frame types for --include:
                 if location is None:
                     raise ValueError('No valid active GPS location found within 60 seconds of requested time')
                 entry.update(location)
+                if args.set_exif_location:
+                    if args.output:
+                        set_location(input_file, location, exiftool, output=args.output,
+                                     overwrite=output_exists)
+                        entry['output'] = os.path.abspath(args.output)
+                    else:
+                        set_location(input_file, location, exiftool)
+                    entry['modified'] = True
+                    print(f'Location written to {args.output or input_file}', file=sys.stderr)
+                try:
+                    entry['locationName'] = geocoder.lookup(location['latitude'], location['longitude'])
+                except Exception as e:
+                    # A name lookup failure must not hide the GPS fix or prevent
+                    # an otherwise valid metadata write.
+                    entry['locationName'] = f'unavailable ({e})'
+                    print(f'{input_file}: Place lookup failed - {e}', file=sys.stderr)
+                    errors += 1
             except Exception as e:
                 entry['error'] = str(e)
                 print(f'{input_file}: Error - {e}', file=sys.stderr)
                 errors += 1
-            results.append(entry)
-        status = write_output(json.dumps(results, indent=2), args.output or '-')
-        return 1 if errors else status
+            try:
+                print(format_location(entry) + '\n', flush=True)
+            except OSError as e:
+                print(f'Error writing output: {e}', file=sys.stderr)
+                return 1
+        try:
+            print(ATTRIBUTION, flush=True)
+        except OSError as e:
+            print(f'Error writing output: {e}', file=sys.stderr)
+            return 1
+        return 1 if errors else 0
 
     # Full metadata and single-frame dumps accept one input file.
     if len(input_files) > 1:

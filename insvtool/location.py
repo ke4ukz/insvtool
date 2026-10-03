@@ -3,6 +3,7 @@
 import math
 import re
 import struct
+from datetime import datetime, timezone
 from typing import Optional
 
 from .frames.frame_types import FrameType
@@ -86,6 +87,9 @@ def find_location(metadata: InsvMetadata, time_offset: float = 0.0) -> Optional[
                 longitude = -longitude
             best_distance = distance
             best = {
+                'videoTime': (timestamp_ms - start_ms) / 1000 if start_ms is not None else None,
+                'gpsDateTime': datetime.fromtimestamp(seconds, timezone.utc).replace(
+                    microsecond=millis * 1000).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
                 'latitude': latitude,
                 'longitude': longitude,
                 'mapUrl': (
